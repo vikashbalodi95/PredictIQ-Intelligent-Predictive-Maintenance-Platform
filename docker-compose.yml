@@ -1,0 +1,79 @@
+# ---------------------------------------------------------------------------
+# docker-compose.yml — runs the whole system with one command
+# ---------------------------------------------------------------------------
+# Start everything:
+#     docker compose up --build
+#
+# Then open:
+#     Dashboard : http://localhost:8501
+#     API docs  : http://localhost:8000/docs
+#
+# Four services share one network and start in dependency order:
+#     db        -> PostgreSQL database
+#     backend   -> FastAPI API (waits for db, seeds tables, then serves)
+#     frontend  -> Streamlit dashboard (talks to backend)
+#     simulator -> streams fake sensor data into the backend
+# ---------------------------------------------------------------------------
+
+services:
+  # --- PostgreSQL database --------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cnc
+      POSTGRES_PASSWORD: cnc
+      POSTGRES_DB: cnc
+    ports:
+      - "5432:5432"            # exposed so you can inspect it with any DB tool
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:               # backend waits until this passes
+      test: ["CMD-SHELL", "pg_isready -U cnc"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # --- FastAPI backend ------------------------------------------------------
+  backend:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg2://cnc:cnc@db:5432/cnc
+      API_BASE_URL: http://backend:8000
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    # Seed the database (tables + default machines), then start the API.
+    command: >
+      sh -c "python -m scripts.init_db &&
+             uvicorn backend.main:app --host 0.0.0.0 --port 8000"
+
+  # --- Streamlit frontend ---------------------------------------------------
+  frontend:
+    build: .
+    environment:
+      # The dashboard reaches the backend by its service name on the network.
+      API_BASE_URL: http://backend:8000
+    depends_on:
+      - backend
+    ports:
+      - "8501:8501"
+    command: >
+      streamlit run frontend/dashboard.py
+      --server.address 0.0.0.0 --server.port 8501
+
+  # --- Sensor simulator -----------------------------------------------------
+  simulator:
+    build: .
+    environment:
+      API_BASE_URL: http://backend:8000
+      SIM_INTERVAL_SECONDS: "2.0"
+      SIM_MACHINES: "4"
+    depends_on:
+      - backend
+    command: python -m simulator.simulator
+
+# Named volume so PostgreSQL data survives `docker compose down`.
+volumes:
+  pgdata:
